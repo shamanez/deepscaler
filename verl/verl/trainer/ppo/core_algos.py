@@ -272,3 +272,52 @@ def kl_penalty(logprob: torch.FloatTensor, ref_logprob: torch.FloatTensor, kl_pe
         raise NotImplementedError
 
     raise NotImplementedError
+
+
+def compute_grpo_advantage_multi_step(token_level_rewards: torch.Tensor,
+                                    eos_mask: torch.Tensor,
+                                    index: torch.Tensor,
+                                    terminal_rewards: torch.Tensor,
+                                    epsilon: float = 1e-6):
+    """
+    Compute advantage for GRPO with multiple interaction steps but terminal rewards
+    Args:
+        token_level_rewards: shape (bs, response_length)
+        eos_mask: shape (bs, response_length)
+        index: Unique IDs to group responses from same prompt
+        terminal_rewards: shape (bs,) containing final rewards for each sequence
+        epsilon: Small value for numerical stability
+    """
+    response_length = token_level_rewards.shape[-1]
+    
+    # Group sequences by their prompt ID
+    id2rewards = defaultdict(list)
+    id2mean = {}
+    id2std = {}
+
+    with torch.no_grad():
+        bsz = terminal_rewards.shape[0]
+        # Group terminal rewards by prompt ID
+        for i in range(bsz):
+            id2rewards[index[i]].append(terminal_rewards[i])
+            
+        # Compute statistics per prompt group
+        for idx in id2rewards:
+            if len(id2rewards[idx]) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(id2rewards[idx]) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(id2rewards[idx]))
+                id2std[idx] = torch.std(torch.tensor(id2rewards[idx]))
+            else:
+                raise ValueError(f"No rewards for prompt index: {idx}")
+                
+        # Normalize advantages
+        advantages = torch.zeros_like(terminal_rewards)
+        for i in range(bsz):
+            advantages[i] = (terminal_rewards[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            
+        # Expand to token level
+        token_advantages = advantages.unsqueeze(-1).expand(-1, response_length) * eos_mask
+
+    return token_advantages, token_advantages
